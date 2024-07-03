@@ -6,6 +6,6 @@
     "express": "^4.19.2",
     "qrcode": "^1.5.3",
     "sdk-node-apis-efi": "^1.1.2",
-    "vercel": "^32.3.0"
+    "uuid": "^8.3.2"
   }
 }
