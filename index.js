@@ -2,17 +2,56 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
+const axios = require('axios');
 const EfiPay = require('sdk-node-apis-efi');
 const options = require('./credentials');
+const qs = require('qs');
 
 const app = express();
 const port = 3090;
 
-// Habilitando o CORS para todas as origens
+
+console.log('Client ID:', process.env.EFI_PAY_API_KEY);
+console.log('Client Secret:', process.env.EFI_PAY_API_SECRET);
+console.log('Chave PIX:', process.env.CHAVE_PIX_EFI_PAY);
+console.log('Certificado:', process.env.EFI_PAY_CERTIFICATE);
+console.log('Modo de Desenvolvimento:', process.env.EFI_PAY_DEVELOPMENT);
+
 app.use(cors());
 app.use(express.json());
 
-// Função para gerar um txid sem caracteres especiais e com comprimento entre 26 e 30 caracteres
+let accessToken = null;
+let tokenExpiration = null;
+
+const authenticate = async () => {
+    try {
+        const response = await axios.post('https://api.efipay.com.br/oauth/token',
+            qs.stringify({
+                grant_type: 'client_credentials',
+                client_id: process.env.EFI_PAY_API_KEY,
+                client_secret: process.env.EFI_PAY_API_SECRET,
+            }), {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            }
+        );
+
+        accessToken = response.data.access_token;
+        tokenExpiration = Date.now() + response.data.expires_in * 1000;
+        console.log('Token obtido com sucesso:', accessToken);
+    } catch (error) {
+        console.error('Erro ao autenticar:', error.response?.data || error.message);
+        throw new Error('Erro ao autenticar na API.');
+    }
+};
+
+const ensureAuthenticated = async (req, res, next) => {
+    if (!accessToken || Date.now() >= tokenExpiration) {
+        await authenticate();
+    }
+    req.accessToken = accessToken;
+    next();
+};
+
 const generateTxid = () => {
     let txid = uuidv4().replace(/-/g, '');
     if (txid.length > 30) {
@@ -23,42 +62,42 @@ const generateTxid = () => {
     return txid;
 };
 
-app.post('/criar-pix', async (req, res) => {
+app.post('/criar-pix', ensureAuthenticated, async (req, res) => {
     try {
         const { transaction_amount } = req.body;
 
-        // Verificar se o amount foi passado no corpo da requisição
-        if (!transaction_amount) {
-            return res.status(400).json({ error: 'transaction_amount é obrigatório.' });
+        if (!transaction_amount || isNaN(transaction_amount)) {
+            return res.status(400).json({ error: 'transaction_amount é obrigatório e deve ser um número.' });
         }
 
         console.log(`Valor da transação recebido: ${transaction_amount}`);
 
-        // Corpo da requisição para a criação da cobrança
         const body = {
             calendario: {
-                expiracao: 3600, // Tempo de expiração da cobrança (em segundos)
+                expiracao: 3600,
             },
             valor: {
                 original: transaction_amount,
             },
-            chave: process.env.CHAVE_PIX_EFI_PAY, // Chave Pix configurada no .env
+            chave: process.env.CHAVE_PIX_EFI_PAY,
         };
 
         let params = {
-            txid: generateTxid(), // Gerando um txid único
+            txid: generateTxid(),
         };
 
         console.log("Parâmetros para criação da cobrança:", params);
         console.log("Corpo da requisição:", body);
 
-        const efipay = new EfiPay(options);
+        const efipay = new EfiPay({
+            ...options,
+            headers: {
+                Authorization: `Bearer ${req.accessToken}`,
+            },
+        });
 
-        // Tentativa de criar a cobrança via API
         const immediateChargeResponse = await efipay.pixCreateCharge(params, body);
-        console.log("Resposta da criação de cobrança:", immediateChargeResponse);
 
-        // Verificação da resposta da criação de cobrança
         if (!immediateChargeResponse || !immediateChargeResponse.loc || !immediateChargeResponse.loc.id) {
             console.error('Resposta inválida ao criar a cobrança:', immediateChargeResponse);
             throw new Error('Resposta inválida ao criar a cobrança');
@@ -68,45 +107,19 @@ app.post('/criar-pix', async (req, res) => {
             id: immediateChargeResponse.loc.id,
         };
 
-        // Tentativa de gerar o QR code
         const qrCodeResponse = await efipay.pixGenerateQRCode(paramID);
-        console.log("Resposta da geração do QR code:", qrCodeResponse);
 
-        // Verificação da resposta da geração do QR code
         if (!qrCodeResponse) {
             console.error('Resposta inválida ao gerar o QR code:', qrCodeResponse);
             throw new Error('Resposta inválida ao gerar o QR code');
         }
 
-        // Enviar a resposta com os dados do QR code e txid
+        console.log("Resposta da geração do QR code:", qrCodeResponse);
+
         res.json({ qrCodeResponse, txid: params.txid });
     } catch (error) {
         console.error("Erro ao processar o pagamento:", error);
         res.status(500).json({ error: 'Erro ao processar o pagamento', details: error.message });
-    }
-});
-
-app.get('/verificar-pagamento/:id', async (req, res) => {
-    const { id } = req.params;
-
-    console.log(`Verificando pagamento para o txid: ${id}`);
-
-    let params = {
-        txid: id,
-    };
-
-    const efipay = new EfiPay(options);
-
-    try {
-        // Tentativa de verificar a cobrança com o ID fornecido
-        const resposta = await efipay.pixDetailCharge(params);
-        console.log("Resposta da verificação do pagamento:", resposta);
-        
-        // Enviar a resposta de verificação de pagamento
-        res.status(200).json({ resposta });
-    } catch (error) {
-        console.error("Erro ao verificar o pagamento:", error);
-        res.status(500).json({ error: 'Erro ao verificar o pagamento', details: error.message });
     }
 });
 
