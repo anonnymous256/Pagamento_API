@@ -25,7 +25,7 @@ let tokenExpiration = null;
 
 const authenticate = async () => {
     try {
-        const response = await axios.post('https://api.efipay.com.br/oauth/token',
+        const response = await axios.post('https://cobrancas-h.api.efipay.com.br/v1/authorize',
             qs.stringify({
                 grant_type: 'client_credentials',
                 client_id: process.env.EFI_PAY_API_KEY,
